@@ -21,12 +21,22 @@ logger = logging.getLogger(SERVICE_NAME)
 
 # Categorias e ações permitidas (fechadas)
 CATEGORIAS = {
-    "Falta_dagua",
-    "Vazamento",
-    "Cobranca",
-    "Religacao",
-    "Atendimento",
-    "Outros",
+    "Pagamento Imediato",
+    "Promessa de Pagamento",
+    "Negociação",
+    "Incapacidade",
+    "Outros / Sem Contexto",
+    "Já pagou",
+    "Não reconhece a dívida",
+    "Questiona o valor",
+    "Já fez contato",
+    "Outros serviços",
+    "Débito em conta",
+    "Saudação",
+    "Canais críticos",
+    "Cadastro atualizado",
+    "Problemas nos canais",
+    "Golpe",
 }
 ACOES = {
     "Abrir_verificacao_rede",
