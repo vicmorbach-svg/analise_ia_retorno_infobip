@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field, field_validator
 import threading
 import requests
 
-MODEL_PATH = Path(os.getenv("LLAMA_MODEL_PATH", "/data/models/model.gguf"))
+MODEL_PATH = Path(LLAMA_MODEL_PATH)
 HF_MODEL_URL = os.getenv("HF_MODEL_URL", "")
 HF_TOKEN = os.getenv("HF_TOKEN", "")
 AUTO_DOWNLOAD = os.getenv("AUTO_DOWNLOAD_MODEL", "true").lower() == "true"
@@ -417,10 +417,13 @@ def classify_llm(item: ItemIn) -> Tuple[str, str, str, float]:
     return categoria, resumo, acao, confianca
 
 def classify_item(item: ItemIn) -> Tuple[str, str, str, float, str]:
-    if MODEL_PROVIDER == "local_llm":
-        if not MODEL_PATH.exists():
-            c, r, a, conf = classify_rules(item.texto or "")
-            return c, r, a, conf, "rules-waiting-model"
+    if MODEL_PROVIDER != "local_llm":
+        c, r, a, conf = classify_rules(item.texto or "")
+        return c, r, a, conf, "rules"
+
+    if not MODEL_PATH.exists() or MODEL_PATH.stat().st_size == 0:
+        c, r, a, conf = classify_rules(item.texto or "")
+        return c, r, a, conf, "rules-waiting-model"
 
     try:
         c, r, a, conf = classify_llm(item)
@@ -449,6 +452,9 @@ def health():
 def ready():
     model_exists = MODEL_PATH.exists() and MODEL_PATH.stat().st_size > 0
     llm_loaded = get_llm() is not None if model_exists and MODEL_PROVIDER == "local_llm" else False
+    part_path = MODEL_PATH.with_suffix(".part")
+    part_size = part_path.stat().st_size if part_path.exists() else 0
+    model_size = MODEL_PATH.stat().st_size if MODEL_PATH.exists() else 0
 
     return {
         "ok": True,
@@ -458,7 +464,9 @@ def ready():
         "modelExists": model_exists,
         "bootstrap": model_bootstrap,
         "llmLoaded": llm_loaded,
-        "llmError": _llm_error
+        "llmError": _llm_error,
+        "partSizeBytes": part_size,
+        "modelSizeBytes": modelsize
     }
 
 @app.post("/classify-batch", response_model=BatchOut)
