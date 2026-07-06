@@ -9,13 +9,15 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
+
+# Pasta para modelo (se usar llama)
 RUN mkdir -p /app/models
 
-# Baixe um GGUF pequeno (exemplo)
-# Substitua pela URL real do modelo escolhido
-# RUN curl -L "URL_DO_MODELO_GGUF" -o /app/models/model.gguf
-
+ENV MODEL_PROVIDER=rules
 ENV MODEL_PATH=/app/models/model.gguf
 ENV N_THREADS=4
+ENV N_CTX=4096
+
+EXPOSE 8080
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
