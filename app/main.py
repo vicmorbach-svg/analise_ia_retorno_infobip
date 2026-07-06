@@ -1,21 +1,20 @@
 from fastapi import FastAPI, Header, HTTPException
-from pydantic import BaseModel
-from typing import List, Optional
-import os, json
-from llama_cpp import Llama
+from pydantic import BaseModel, Field
+from typing import List, Optional, Dict, Any
+import os
+import json
+import re
 
+# =========================
+# Config
+# =========================
 API_KEY = os.getenv("API_KEY", "")
-MODEL_PATH = os.getenv("MODEL_PATH", "models/model.gguf")
+MODEL_PROVIDER = os.getenv("MODEL_PROVIDER", "rules")  # rules | llama
+MODEL_PATH = os.getenv("MODEL_PATH", "/app/models/model.gguf")
+N_THREADS = int(os.getenv("N_THREADS", "4"))
+N_CTX = int(os.getenv("N_CTX", "4096"))
 
-app = FastAPI(title="Classifier API")
-
-llm = Llama(
-    model_path=MODEL_PATH,
-    n_ctx=4096,
-    n_threads=int(os.getenv("N_THREADS", "4")),
-    verbose=False
-)
-
+# Categorias e ações permitidas
 CATEGORIAS = [
   
   "Pagamento Imediato",
@@ -43,20 +42,120 @@ ACOES = [
     "Encerrar_sem_acao"
 ]
 
+app = FastAPI(title="IA Classifier API", version="1.0.0")
+
+_llm = None
+_llm_load_error = None
+
+def try_load_llm():
+    global _llm, _llm_load_error
+    if MODEL_PROVIDER != "llama":
+        return
+    try:
+        from llama_cpp import Llama
+        _llm = Llama(
+            model_path=MODEL_PATH,
+            n_ctx=N_CTX,
+            n_threads=N_THREADS,
+            verbose=False
+        )
+    except Exception as e:
+        _llm_load_error = str)
+        _llm = None
+
+try_load_llm()
+
+# =========================
+# Schemas
+# =========================
 class ItemIn(BaseModel):
     messageId: str
-    texto: str
-    from_: Optional[str] = None
+    texto: str = ""
+    from_: Optional[str] = Field(default=None, alias="from")
     receivedAt: Optional[str] = None
     numLigacao: Optional[str] = None
 
 class BatchIn(BaseModel):
     items: List[ItemIn]
 
-@app.get("/health")
-def health():
-    return {"ok": True}
+class ItemOut(BaseModel):
+    messageId: str
+    categoria: str
+    resumo: str
+    acao: str
+    confianca: float
 
+class BatchOut(BaseModel):
+    ok: bool
+    provider: str
+    results: List[ItemOut]
+    errors: List[Dict[str, Any]]
+
+# =========================
+# Classificação por regras (rápida e barata)
+# =========================
+def classify_rules(texto: str) -> Dict[str, Any]:
+    t = (texto or "").strip().lower()
+
+    if not t:
+        return {
+            "categoria": "Outros",
+            "resumo": "Mensagem sem texto",
+            "acao": "Solicitar_dados_complementares",
+            "confianca": 0.35
+        }
+
+    # Regras simples (ajuste conforme seu negócio)
+    if re.search(r"\bfalta\b.*\bágua\b|\bsem água\b|\bsem agua\b", t):
+        return {
+            "categoria": "Falta_dagua",
+            "resumo": "Cliente relata falta de água",
+            "acao": "Abrir_verificacao_rede",
+            "confianca": 0.93
+        }
+
+    if re.search(r"\bvazamento\b|\bvaza\b", t):
+        return {
+            "categoria": "Vazamento",
+            "resumo": "Cliente relata vazamento",
+            "acao": "Abrir_verificacao_rede",
+            "confianca": 0.92
+        }
+
+    if re.search(r"\bconta\b|\bcobrança\b|\bcobranca\b|\b2a via\b|\bsegunda via\b", t):
+        return {
+            "categoria": "Cobranca",
+            "resumo": "Dúvida/solicitação sobre cobrança",
+            "acao": "Direcionar_comercial",
+            "confianca": 0.90
+        }
+
+    if re.search(r"\breliga(?:ção|cao|r)\b|\bcorte\b", t):
+        return {
+            "categoria": "Religacao",
+            "resumo": "Solicitação sobre religação/corte",
+            "acao": "Direcionar_comercial",
+            "confianca": 0.88
+        }
+
+    if re.search(r"\bobrigad[oa]\b|\bagrade", t):
+        return {
+            "categoria": "Atendimento",
+            "resumo": "Interação de atendimento geral",
+            "acao": "Encerrar_sem_acao",
+            "confianca": 0.80
+        }
+
+    return {
+        "categoria": "Outros",
+        "resumo": (texto[:120] + "...") if len(texto) > 120 else texto,
+        "acao": "Solicitar_dados_complementares",
+        "confianca": 0.60
+    }
+
+# =========================
+# Classificação por LLM (opcional)
+# =========================
 def classify_one(texto: str):
     prompt = f"""
  Você é um agente especialista em análise de dados e recuperação de crédito.
@@ -114,61 +213,88 @@ Responda SOMENTE JSON válido no formato:
 
 Categorias permitidas: {CATEGORIAS}
 
-
 Mensagem:
 {texto}
 """.strip()
 
-    out = llm.create_chat_completion(
-        messages=[{"role":"user","content":prompt}],
+    out = _llm.create_chat_completion(
+        messages=[{"role": "user", "content": prompt}],
         temperature=0.1,
         max_tokens=220
     )
+
     content = out["choices"][0]["message"]["content"].strip()
 
-    # fallback defensivo
     try:
         obj = json.loads(content)
-    except:
-        obj = {
-            "categoria": "Outros",
-            "resumo": (texto[:120] + "...") if len(texto) > 120 else texto,
-            "acao": "Solicitar_dados_complementares",
-            "confianca": 0.3
-        }
+    except Exception:
+        return classify_rules(texto)
 
-    if obj.get("categoria") not in CATEGORIAS:
-        obj["categoria"] = "Outros"
-    if obj.get("acao") not in ACOES:
-        obj["acao"] = "Solicitar_dados_complementares"
+    categoria = obj.get("categoria", "Outros")
+    acao = obj.get("acao", "Solicitar_dados_complementares")
+    resumo = obj.get("resumo", "")
+    confianca = obj.get("confianca", 0.5)
+
+    if categoria not in CATEGORIAS:
+        categoria = "Outros"
+    if acao not in ACOES:
+        acao = "Solicitar_dados_complementares"
 
     try:
-        conf = float(obj.get("confianca", 0.5))
-    except:
-        conf = 0.5
-    obj["confianca"] = max(0.0, min(1.0, conf))
+        confianca = float(confianca)
+    except Exception:
+        confianca = 0.5
 
-    return obj
+    confianca = max(0.0, min(1.0, confianca))
 
-@app.post("/classify-batch")
+    return {
+        "categoria": categoria,
+        "resumo": resumo if isinstance(resumo, str) and resumo.strip() else classify_rules(texto)["resumo"],
+        "acao": acao,
+        "confianca": confianca
+    }
+
+def classify(texto: str) -> Dict[str, Any]:
+    if MODEL_PROVIDER == "llama":
+        return classify_llm(texto)
+    return classify_rules(texto)
+
+# =========================
+# Endpoints
+# =========================
+@app.get("/health")
+def health():
+    return {
+        "ok": True,
+        "provider": MODEL_PROVIDER,
+        "llmLoaded": _llm is not None,
+        "llmError": _llm_load_error
+    }
+
+@app.post("/classify-batch", response_model=BatchOut)
 def classify_batch(payload: BatchIn, x_api_key: str = Header(default="")):
     if API_KEY and x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="unauthorized")
 
-    results = []
-    errors = []
+    results: List[ItemOut] = []
+    errors: List[Dict[str, Any]] = []
 
     for it in payload.items:
         try:
-            cls = classify_one(it.texto or "")
-            results.append({
-                "messageId": it.messageId,
-                "categoria": cls["categoria"],
-                "resumo": cls["resumo"],
-                "acao": cls["acao"],
-                "confianca": cls["confianca"]
-            })
+            cls = classify(it.texto or "")
+            results.append(ItemOut(
+                messageId=it.messageId,
+                categoria=cls["categoria"],
+                resumo=cls["resumo"],
+                acao=cls["acao"],
+                confianca=cls["confianca"]
+            ))
         except Exception as e:
             errors.append({"messageId": it.messageId, "erro": str(e)})
 
-    return {"ok": True, "results": results, "errors": errors}
+    return BatchOut(
+        ok=True,
+        provider=MODEL_PROVIDER if (_llm is not None or MODEL_PROVIDER == "rules") else "rules",
+        results=results,
+        errors=errors
+    )
