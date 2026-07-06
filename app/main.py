@@ -1,28 +1,26 @@
-from fastapi import FastAPI, Header, HTTPException
-from pydantic import BaseModel
-from typing import List
 import os
+import re
+import logging
+from typing import List, Optional, Dict, Any, Tuple
 
+from fastapi import FastAPI, Header, HTTPException
+from pydantic import BaseModel, Field, field_validator
+
+# =========================
+# Configuração
+# =========================
 API_KEY = os.getenv("API_KEY", "")
-MODEL_PROVIDER = os.getenv("MODEL_PROVIDER", "rules")  # rules | llama
-MODEL_PATH = os.getenv("MODEL_PATH", "/app/models/model.gguf")
-N_THREADS = int(os.getenv("N_THREADS", "4"))
-N_CTX = int(os.getenv("N_CTX", "4096"))
-app = FastAPI()
+SERVICE_NAME = os.getenv("SERVICE_NAME", "ia-classifier")
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
-class ItemIn(BaseModel):
-    messageId: str
-    texto: str = ""
+logging.basicConfig(
+    level=LOG_LEVEL,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+)
+logger = logging.getLogger(SERVICE_NAME)
 
-class BatchIn(BaseModel):
-    items: List[ItemIn]
-
-@app.get("/health")
-def health():
-    return {"ok": True}
-
-# Categorias e ações permitidas
-CATEGORIAS = [
+# Categorias e ações permitidas (fechadas)
+CATEGORIAS = {
   
   "Pagamento Imediato",
   "Promessa de Pagamento",
@@ -40,45 +38,39 @@ CATEGORIAS = [
   "Cadastro atualizado",
   "Problemas nos canais",
   "Golpe"
-]
-
-ACOES = [
+}
+ACOES = {
     "Abrir_verificacao_rede",
     "Direcionar_comercial",
     "Solicitar_dados_complementares",
-    "Encerrar_sem_acao"
-]
+    "Encerrar_sem_acao",
+}
 
-_llm = None
-_llm_load_error = None
-
-def try_load_llm():
-    global _llm, _llm_load_error
-    if MODEL_PROVIDER != "llama":
-        return
-    try:
-        from llama_cpp import Llama
-        _llm = Llama(
-            model_path=MODEL_PATH,
-            n_ctx=N_CTX,
-            n_threads=N_THREADS,
-            verbose=False
-        )
-    except Exception as e:
-        _llm_load_error = str)
-        _llm = None
-
-try_load_llm()
+# =========================
+# App
+# =========================
+app = FastAPI(
+    title="IA Classifier API",
+    version="1.1.0",
+    description="Classificador de mensagens para Power Automate"
+)
 
 # =========================
 # Schemas
 # =========================
 class ItemIn(BaseModel):
-    messageId: str
-    texto: str = ""
+    messageId: str = Field(..., min_length=1)
+    texto: Optional[str] = ""
     from_: Optional[str] = Field(default=None, alias="from")
     receivedAt: Optional[str] = None
     numLigacao: Optional[str] = None
+
+    @field_validator("texto", mode="before")
+    @classmethod
+    def normalize_texto(cls, v):
+        if v is None:
+            return ""
+        return str(v)
 
 class BatchIn(BaseModel):
     items: List[ItemIn]
@@ -97,209 +89,131 @@ class BatchOut(BaseModel):
     errors: List[Dict[str, Any]]
 
 # =========================
-# Classificação por regras (rápida e barata)
+# Utilitários
 # =========================
-def classify_rules(texto: str) -> Dict[str, Any]:
-    t = (texto or "").strip().lower()
+def clean_text(texto: str) -> str:
+    t = (texto or "").strip()
+    # normaliza espaços
+    t = re.sub(r"\s+", " ", t)
+    return t
+
+def clamp_conf(x: float) -> float:
+    try:
+        v = float(x)
+    except Exception:
+        v = 0.5
+    return max(0.0, min(1.0, v))
+
+def summarize(texto: str, max_len: int = 120) -> str:
+    t = clean_text(texto)
+    if not t:
+        return "Mensagem sem texto"
+    return t if len(t) <= max_len else t[:max_len - 3] + "..."
+
+def classify_rules(texto: str) -> Tuple[str, str, str, float]:
+    t = clean_text(texto).lower()
 
     if not t:
-        return {
-            "categoria": "Outros",
-            "resumo": "Mensagem sem texto",
-            "acao": "Solicitar_dados_complementares",
-            "confianca": 0.35
-        }
+        return ("Outros", "Mensagem sem texto", "Solicitar_dados_complementares", 0.35)
 
-    # Regras simples (ajuste conforme seu negócio)
-    if re.search(r"\bfalta\b.*\bágua\b|\bsem água\b|\bsem agua\b", t):
-        return {
-            "categoria": "Falta_dagua",
-            "resumo": "Cliente relata falta de água",
-            "acao": "Abrir_verificacao_rede",
-            "confianca": 0.93
-        }
+    # Falta de água
+    if re.search(r"\b(sem água|sem agua|falta de água|falta de agua)\b", t):
+        return ("Falta_dagua", "Cliente relata falta de água", "Abrir_verificacao_rede", 0.93)
 
-    if re.search(r"\bvazamento\b|\bvaza\b", t):
-        return {
-            "categoria": "Vazamento",
-            "resumo": "Cliente relata vazamento",
-            "acao": "Abrir_verificacao_rede",
-            "confianca": 0.92
-        }
+    # Vazamento
+    if re.search(r"\bvazamento\b|\bvaza(mento|ndo|r)?\b", t):
+        return ("Vazamento", "Cliente relata vazamento", "Abrir_verificacao_rede", 0.92)
 
-    if re.search(r"\bconta\b|\bcobrança\b|\bcobranca\b|\b2a via\b|\bsegunda via\b", t):
-        return {
-            "categoria": "Cobranca",
-            "resumo": "Dúvida/solicitação sobre cobrança",
-            "acao": "Direcionar_comercial",
-            "confianca": 0.90
-        }
+    # Cobrança / conta
+    if re.search(r"\b(cobrança|cobranca|conta|2a via|segunda via|fatura|boleto)\b", t):
+        return ("Cobranca", "Solicitação relacionada à cobrança/conta", "Direcionar_comercial", 0.90)
 
-    if re.search(r"\breliga(?:ção|cao|r)\b|\bcorte\b", t):
-        return {
-            "categoria": "Religacao",
-            "resumo": "Solicitação sobre religação/corte",
-            "acao": "Direcionar_comercial",
-            "confianca": 0.88
-        }
+    # Religação / corte
+    if re.search(r"\b(religa(ção|cao|r)|corte|ligação cortada|ligacao cortada)\b", t):
+        return ("Religacao", "Solicitação sobre religação/corte", "Direcionar_comercial", 0.88)
 
-    if re.search(r"\bobrigad[oa]\b|\bagrade", t):
-        return {
-            "categoria": "Atendimento",
-            "resumo": "Interação de atendimento geral",
-            "acao": "Encerrar_sem_acao",
-            "confianca": 0.80
-        }
+    # Atendimento geral
+    if re.search(r"\b(obrigad[oa]|agradeço|agradeco|bom dia|boa tarde|boa noite)\b", t):
+        return ("Atendimento", "Interação geral de atendimento", "Encerrar_sem_acao", 0.78)
 
-    return {
-        "categoria": "Outros",
-        "resumo": (texto[:120] + "...") if len(texto) > 120 else texto,
-        "acao": "Solicitar_dados_complementares",
-        "confianca": 0.60
-    }
+    return ("Outros", summarize(texto), "Solicitar_dados_complementares", 0.60)
 
-# =========================
-# Classificação por LLM (opcional)
-# =========================
-def classify_one(texto: str):
-    prompt = f"""
- Você é um agente especialista em análise de dados e recuperação de crédito.
+def ensure_allowed(categoria: str, acao: str, confianca: float):
+    cat = categoria if categoria in CATEGORIAS else "Outros"
+    act = acao if acao in ACOES else "Solicitar_dados_complementares"
+    conf = clamp_conf(confianca)
+    return cat, act, conf
 
-TAREFA
-Classifique a mensagem do cliente em APENAS UMA categoria da lista abaixo e retorne somente JSON válido.
-
-CATEGORIAS PERMITIDAS (texto exato):
-- "Pagamento Imediato"
-- "Promessa de Pagamento"
-- "Negociação"
-- "Incapacidade"
-- "Outros / Sem Contexto"
-- "Já pagou"
-- "Não reconhece a dívida"
-- "Questiona o valor"
-- "Já fez contato"
-- "Outros serviços"
-- "Débito em conta"
-- "Saudação"
-- "Canais críticos"
-- "Cadastro atualizado"
-- "Problemas nos canais"
-- "Golpe"
-
-
-REGRAS DE CLASSIFICAÇÃO
-1) Pagamento Imediato: pede PIX, boleto atualizado, código de barras, diz que vai pagar hoje, pede fatura para pagar, pede reenvio da fatura.
-2) Promessa de Pagamento: informa data futura para pagar.
-3) Negociação: pede parcelamento ou desconto.
-4) Incapacidade: diz que não tem dinheiro, está desempregado, não consegue pagar.
-5) Outros / Sem Contexto: mensagem sem sentido, automática, emoji isolado, assunto fora de cobrança, opção inválida, “não entendemos sua mensagem”.
-6) Já pagou: informa que já realizou o pagamento.
-7) Não reconhece a dívida: diz que não é cliente, não está no nome dele, não é mais o usuário do imóvel.
-8) Questiona o valor: diz que a conta está errada, revisão de fatura.
-9) Já fez contato: informa contato anterior por outro canal.
-10) Outros serviços: vazamento, esgoto, buraco na rua, religação, solicitações fora de cobrança.
-11) Débito em conta: menciona cadastro de débito em conta.
-12) Saudação: bom dia, boa tarde, boa noite, oi, olá. 
-13) Canais críticos: processo, justiça, procon, agência reguladora, agergs, agesan, advogado.
-14) Cadastro atualizado: quando a mensagem é 'Está atualizado'
-
-15) Fala que o site, app, aplicativo, agência virtual, whatsapp, chat ou call center não funcionam, são ruins, não consegue usar, cita problemas ou reclama desses canais.
-
-16) Fala em golpe, não acredita na mensagem, acha que está sendo enganado.
-
-DESEMPATE (ordem de prioridade)
-- Se mencionar processo/justiça/procon => "Canais críticos"
-- Se disser que já pagou => "Já pagou"
-- Se pedir PIX/boleto/código para pagar agora => "Pagamento Imediato"
-- Se informar pagamento futuro => "Promessa de Pagamento"
-
-Responda SOMENTE JSON válido no formato:
-{{"categoria":"...","resumo":"...","acao":"...","confianca":0.0}}
-
-Categorias permitidas: {CATEGORIAS}
-
-Mensagem:
-{texto}
-""".strip()
-
-    out = _llm.create_chat_completion(
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.1,
-        max_tokens=220
-    )
-
-    content = out["choices"][0]["message"]["content"].strip()
-
-    try:
-        obj = json.loads(content)
-    except Exception:
-        return classify_rules(texto)
-
-    categoria = obj.get("categoria", "Outros")
-    acao = obj.get("acao", "Solicitar_dados_complementares")
-    resumo = obj.get("resumo", "")
-    confianca = obj.get("confianca", 0.5)
-
-    if categoria not in CATEGORIAS:
-        categoria = "Outros"
-    if acao not in ACOES:
-        acao = "Solicitar_dados_complementares"
-
-    try:
-        confianca = float(confianca)
-    except Exception:
-        confianca = 0.5
-
-    confianca = max(0.0, min(1.0, confianca))
-
-    return {
-        "categoria": categoria,
-        "resumo": resumo if isinstance(resumo, str) and resumo.strip() else classify_rules(texto)["resumo"],
-        "acao": acao,
-        "confianca": confianca
-    }
-
-def classify(texto: str) -> Dict[str, Any]:
-    if MODEL_PROVIDER == "llama":
-        return classify_llm(texto)
-    return classify_rules(texto)
+def auth_or_401(x_api_key: str):
+    # Se API_KEY estiver configurada, exige autenticação.
+    if API_KEY and x_api_key != API_KEY:
+        raise HTTPException(status_code=401, detail="unauthorized")
 
 # =========================
 # Endpoints
 # =========================
 @app.get("/health")
 def health():
-    return {
-        "ok": True,
-        "provider": MODEL_PROVIDER,
-        "llmLoaded": _llm is not None,
-        "llmError": _llm_load_error
-    }
+    # Endpoint leve para healthcheck do Railway
+    return {"ok": True, "service": SERVICE_NAME}
+
+@app.get("/ready")
+def ready():
+    # Prontidão básica (pode evoluir depois com checagens extras)
+    return {"ok": True, "ready": True}
 
 @app.post("/classify-batch", response_model=BatchOut)
 def classify_batch(payload: BatchIn, x_api_key: str = Header(default="")):
-    if API_KEY and x_api_key != API_KEY:
-        raise HTTPException(status_code=401, detail="unauthorized")
+    auth_or_401(x_api_key)
+
+    if not payload.items:
+        return BatchOut(ok=True, provider="rules", results=[], errors=[])
+
+    # Deduplicação por messageId no próprio lote
+    seen = set()
+    dedup_items: List[ItemIn] = []
+    dup_count = 0
+    for item in payload.items:
+        if item.messageId in seen:
+            dup_count += 1
+            continue
+        seen.add(item.messageId)
+        dedup_items.append(item)
 
     results: List[ItemOut] = []
     errors: List[Dict[str, Any]] = []
 
-    for it in payload.items:
+    for it in dedup_items:
         try:
-            cls = classify(it.texto or "")
+            categoria, resumo, acao, confianca = classify_rules(it.texto or "")
+            categoria, acao, confianca = ensure_allowed(categoria, acao, confianca)
+
             results.append(ItemOut(
                 messageId=it.messageId,
-                categoria=cls["categoria"],
-                resumo=cls["resumo"],
-                acao=cls["acao"],
-                confianca=cls["confianca"]
+                categoria=categoria,
+                resumo=resumo,
+                acao=acao,
+                confianca=confianca
             ))
         except Exception as e:
+            logger.exception("Erro ao classificar messageId=%s", it.messageId)
             errors.append({"messageId": it.messageId, "erro": str(e)})
+
+    logger.info(
+        "Batch processado | recebidos=%d deduplicados=%d duplicados=%d sucesso=%d erros=%d",
+        len(payload.items), len(dedup_items), dup_count, len(results), len(errors)
+    )
 
     return BatchOut(
         ok=True,
-        provider=MODEL_PROVIDER if (_llm is not None or MODEL_PROVIDER == "rules") else "rules",
+        provider="rules",
         results=results,
         errors=errors
     )
+
+# Ponto de entrada local (útil para rodar fora do Railway)
+# Boas práticas do __main__ seguem a convenção do Python. <sources>[2]</sources>
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", "8080"))
+    uvicorn.run("app.main:app", host="0.0.0.0", port=port, reload=False)
