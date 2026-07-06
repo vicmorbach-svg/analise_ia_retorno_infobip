@@ -28,3 +28,14 @@ ENV LLAMA_MODEL_PATH=/app/models/model.gguf
 
 EXPOSE 8080
 CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}"]
+
+CMD ["sh", "-c", "mkdir -p /app/models && \
+if [ ! -s /app/models/model.gguf ]; then \
+  echo 'Baixando modelo GGUF...'; \
+  if [ -n \"$HF_TOKEN\" ]; then \
+    curl -L -H \"Authorization: Bearer $HF_TOKEN\" \"$HF_MODEL_URL\" -o /app/models/model.gguf; \
+  else \
+    curl -L \"$HF_MODEL_URL\" -o /app/models/model.gguf; \
+  fi; \
+fi && ls -lh /app/models && \
+uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}"]
