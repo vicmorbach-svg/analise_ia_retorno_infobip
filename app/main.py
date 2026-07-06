@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field, field_validator
 import threading
 import requests
 
-MODEL_PATH = Path(LLAMA_MODEL_PATH)
+
 HF_MODEL_URL = os.getenv("HF_MODEL_URL", "")
 HF_TOKEN = os.getenv("HF_TOKEN", "")
 AUTO_DOWNLOAD = os.getenv("AUTO_DOWNLOAD_MODEL", "true").lower() == "true"
@@ -72,7 +72,7 @@ MODEL_PROVIDER = os.getenv("MODEL_PROVIDER", "local_llm").lower()
 LLAMA_MODEL_PATH = os.getenv("LLAMA_MODEL_PATH", "/app/models/model.gguf")
 LLAMA_N_CTX = int(os.getenv("LLAMA_N_CTX", "4096"))
 LLAMA_N_THREADS = int(os.getenv("LLAMA_N_THREADS", "4"))
-
+MODEL_PATH = Path(LLAMA_MODEL_PATH)
 # Inferência
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.1"))
 LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "260"))
@@ -466,7 +466,7 @@ def ready():
         "llmLoaded": llm_loaded,
         "llmError": _llm_error,
         "partSizeBytes": part_size,
-        "modelSizeBytes": modelsize
+        "modelSizeBytes": model_size
     }
 
 @app.post("/classify-batch", response_model=BatchOut)
