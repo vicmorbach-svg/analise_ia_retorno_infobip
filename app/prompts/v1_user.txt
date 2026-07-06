@@ -1,0 +1,7 @@
+Classifique a mensagem abaixo.
+
+messageId: {messageId}
+from: {from_}
+receivedAt: {receivedAt}
+numLigacao: {numLigacao}
+texto: {texto}
