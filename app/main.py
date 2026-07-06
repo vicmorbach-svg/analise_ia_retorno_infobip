@@ -10,6 +10,54 @@ from typing import List, Optional, Dict, Any, Tuple
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
+import threading
+import requests
+
+MODEL_PATH = Path(os.getenv("LLAMA_MODEL_PATH", "/data/models/model.gguf"))
+HF_MODEL_URL = os.getenv("HF_MODEL_URL", "")
+HF_TOKEN = os.getenv("HF_TOKEN", "")
+AUTO_DOWNLOAD = os.getenv("AUTO_DOWNLOAD_MODEL", "true").lower() == "true"
+
+model_bootstrap = {
+    "started": False,
+    "done": False,
+    "ok": False,
+    "error": None
+}
+
+def download_model_if_needed():
+    try:
+        MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+        # já existe e não está vazio
+        if MODEL_PATH.exists() and MODEL_PATH.stat().st_size > 0:
+            model_bootstrap["ok"] = True
+            model_bootstrap["done"] = True
+            return
+
+        if not HF_MODEL_URL:
+            raise RuntimeError("HF_MODEL_URL não definido")
+
+        tmp_path = MODEL_PATH.with_suffix(".part")
+        headers = {}
+        if HF_TOKEN:
+            headers["Authorization"] = f"Bearer {HF_TOKEN}"
+
+        with requests.get(HF_MODEL_URL, headers=headers, stream=True, timeout=120) as r:
+            r.raise_for_status()
+            with open(tmp_path, "wb") as f:
+                for chunk in r.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        f.write(chunk)
+
+        tmp_path.replace(MODEL_PATH)  # atomic move
+        model_bootstrap["ok"] = True
+    except Exception as e:
+        model_bootstrap["error"] = str(e)
+        model_bootstrap["ok"] = False
+    finally:
+        model_bootstrap["done"] = True
+
 # =========================
 # Configuração
 # =========================
@@ -369,9 +417,10 @@ def classify_llm(item: ItemIn) -> Tuple[str, str, str, float]:
     return categoria, resumo, acao, confianca
 
 def classify_item(item: ItemIn) -> Tuple[str, str, str, float, str]:
-    if MODEL_PROVIDER == "rules":
-        c, r, a, conf = classify_rules(item.texto or "")
-        return c, r, a, conf, "rules"
+    if MODEL_PROVIDER == "local_llm":
+        if not MODEL_PATH.exists():
+            c, r, a, conf = classify_rules(item.texto or "")
+            return c, r, a, conf, "rules-waiting-model"
 
     try:
         c, r, a, conf = classify_llm(item)
@@ -384,6 +433,13 @@ def classify_item(item: ItemIn) -> Tuple[str, str, str, float, str]:
 # =========================
 # Endpoints
 # =========================
+@app.on_event("startup")
+def startup_event():
+    if AUTO_DOWNLOAD and not model_bootstrap["started"]:
+        model_bootstrap["started"] = True
+        t = threading.Thread(target=download_model_if_needed, daemon=True)
+        t.start()
+
 @app.get("/health")
 def health():
     # Endpoint leve para healthcheck do Railway
@@ -391,14 +447,17 @@ def health():
 
 @app.get("/ready")
 def ready():
-    # Estado de prontidão + modelo local
-    loaded = get_llm() is not None if MODEL_PROVIDER == "local_llm" else True
+    model_exists = MODEL_PATH.exists() and MODEL_PATH.stat().st_size > 0
+    llm_loaded = get_llm() is not None if model_exists and MODEL_PROVIDER == "local_llm" else False
+
     return {
         "ok": True,
-        "ready": loaded,
+        "ready": bool(model_exists and llm_loaded),
         "provider": MODEL_PROVIDER,
         "promptVersion": PROMPT_VERSION,
-        "llmLoaded": loaded,
+        "modelExists": model_exists,
+        "bootstrap": model_bootstrap,
+        "llmLoaded": llm_loaded,
         "llmError": _llm_error
     }
 
