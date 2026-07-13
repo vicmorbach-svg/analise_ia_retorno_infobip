@@ -161,65 +161,16 @@ class BatchOut(BaseModel):
 # =========================
 # Prompt (arquivos)
 # =========================
-DEFAULT_SYSTEM_PROMPT = """Você é um classificador de mensagens de cobrança.
-Responda APENAS JSON válido, sem markdown e sem texto extra.
 
-Formato obrigatório:
-{
-  "categoria": "string",
-  "resumo": "string",
-  "acao": "string",
-  "confianca": 0.0
-}
 
-Categorias permitidas:
-- Pagamento Imediato
-- Promessa de Pagamento
-- Negociação
-- Incapacidade
-- Outros / Sem Contexto
-- Já pagou
-- Não reconhece a dívida
-- Questiona o valor
-- Já fez contato
-- Outros serviços
-- Débito em conta
-- Saudação
-- Canais críticos
-- Cadastro atualizado
-- Problemas nos canais
-- Golpe
-
-Ações permitidas:
-- Abrir_verificacao_rede
-- Direcionar_comercial
-- Solicitar_dados_complementares
-- Encerrar_sem_acao
-
-Regras:
-- Se houver dúvida, use "Outros / Sem Contexto".
-- resumo objetivo em até 140 caracteres.
-- confianca entre 0 e 1.
-- nunca invente dados.
-"""
-
-DEFAULT_USER_TEMPLATE = """Classifique a mensagem abaixo.
-
-messageId: {messageId}
-from: {from_}
-receivedAt: {receivedAt}
-numLigacao: {numLigacao}
-texto: {texto}
-"""
-
-def load_prompt_file(filename: str, fallback: str) -> str:
+def load_prompt_required(filename: str) -> str:
     p = PROMPTS_DIR / filename
-    if p.exists():
-        return p.read_text(encoding="utf-8")
-    return fallback
+    if not p.exists():
+        raise RuntimeError(f"Prompt obrigatório ausente: {p}")
+    return p.read_text(encoding="utf-8")
 
-SYSTEM_PROMPT = load_prompt_file(f"{PROMPT_VERSION}_system.txt", DEFAULT_SYSTEM_PROMPT)
-USER_TEMPLATE = load_prompt_file(f"{PROMPT_VERSION}_user.txt", DEFAULT_USER_TEMPLATE)
+SYSTEM_PROMPT = load_prompt_required(f"{PROMPT_VERSION}_system.txt")
+USER_TEMPLATE = load_prompt_required(f"{PROMPT_VERSION}_user.txt")
 
 def build_user_prompt(item: ItemIn) -> str:
     return USER_TEMPLATE.format(
