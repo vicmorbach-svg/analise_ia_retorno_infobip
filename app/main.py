@@ -128,6 +128,7 @@ app = FastAPI(
 # Schemas
 # =========================
 class ItemIn(BaseModel):
+    spId: Optional[int] = None
     messageId: str = Field(..., min_length=1)
     texto: Optional[str] = ""
     from_: Optional[str] = Field(default=None, alias="from")
@@ -145,6 +146,7 @@ class BatchIn(BaseModel):
     items: List[ItemIn]
 
 class ItemOut(BaseModel):
+    spId: Optional[int] = None
     messageId: str
     categoria: str
     resumo: str
@@ -427,27 +429,18 @@ def classify_batch(payload: BatchIn, x_api_key: str = Header(default="")):
     if not payload.items:
         return BatchOut(ok=True, provider=MODEL_PROVIDER, promptVersion=PROMPT_VERSION, results=[], errors=[])
 
-    # Deduplicação por messageId no próprio lote
-    seen = set()
-    dedup_items: List[ItemIn] = []
-    dup_count = 0
-    for item in payload.items:
-        if item.messageId in seen:
-            dup_count += 1
-            continue
-        seen.add(item.messageId)
-        dedup_items.append(item)
 
     results: List[ItemOut] = []
     errors: List[Dict[str, Any]] = []
     providers_used = set()
 
-    for it in dedup_items:
+    for it in payload.items:
         try:
             categoria, resumo, acao, confianca, provider_used = classify_item(it)
             categoria, acao, confianca = ensure_allowed(categoria, acao, confianca)
 
             results.append(ItemOut(
+                spId=it.spId,
                 messageId=it.messageId,
                 categoria=categoria,
                 resumo=resumo,
@@ -462,8 +455,8 @@ def classify_batch(payload: BatchIn, x_api_key: str = Header(default="")):
     provider_label = ",".join(sorted(providers_used)) if providers_used else MODEL_PROVIDER
 
     logger.info(
-        "Batch processado | recebidos=%d deduplicados=%d duplicados=%d sucesso=%d erros=%d provider=%s prompt=%s",
-        len(payload.items), len(dedup_items), dup_count, len(results), len(errors), provider_label, PROMPT_VERSION
+        "Batch processado | recebidos=%d sucesso=%d erros=%d provider=%s prompt=%s",
+        len(payload.items), len(results), len(errors), provider_label, PROMPT_VERSION
     )
 
     return BatchOut(
